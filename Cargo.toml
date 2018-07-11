@@ -1,0 +1,7 @@
+[package]
+name = "gb18"
+version = "0.1.0"
+authors = ["pyrated <pyrated@gmail.com>"]
+
+[dependencies]
+sdl2 = "0.31"
