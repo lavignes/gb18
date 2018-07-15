@@ -1,5 +1,7 @@
-use std::{mem};
+#[cfg(test)]
+mod tests;
 
+use std::{mem};
 use mmu::Mmu;
 
 #[derive(Default)]
@@ -10,6 +12,8 @@ pub struct Cpu {
     bc: u16,
     de: u16,
     hl: u16,
+
+    interrupts_enabled: bool,
 
     stopped: bool,
 
@@ -369,9 +373,21 @@ impl Cpu {
     }
 
     #[inline]
+    fn push_value(&mut self, value: u8, mmu: &mut impl Mmu) {
+        mmu.write(self.sp, value);
+        self.sp = self.sp.wrapping_sub(1);
+    }
+
+    #[inline]
+    fn push_wide_value(&mut self, value: u16, mmu: &mut impl Mmu) {
+        self.sp = self.sp.wrapping_sub(2);
+        self.write_wide(self.sp, value, mmu);
+    }
+
+    #[inline]
     fn ret(&mut self, mmu: &impl Mmu) -> usize {
         self.pc = self.pop_wide_value(mmu);
-        4
+        16
     }
 
     #[inline]
@@ -483,6 +499,22 @@ impl Cpu {
         let value = self.read(mmu);
         mmu.write(self.wide_register(WideRegister::HL), value);
         12
+    }
+
+    #[inline]
+    fn write_register_immediate(&mut self, reg: Register, mmu: &mut impl Mmu) -> usize {
+        let address = self.read_wide(mmu);
+        let value = self.register(reg);
+        mmu.write(address, value);
+        16
+    }
+
+    #[inline]
+    fn read_register_immediate(&mut self, reg: Register, mmu: &mut impl Mmu) -> usize {
+        let address = self.read_wide(mmu);
+        let value = mmu.read(address);
+        self.set_register(reg, value);
+        16
     }
 
     #[inline]
@@ -610,6 +642,13 @@ impl Cpu {
     }
 
     #[inline]
+    fn and_immediate(&mut self, mmu: &impl Mmu) -> usize {
+        let value = self.read(mmu);
+        self.and_value(value);
+        8
+    }
+
+    #[inline]
     fn xor_value(&mut self, value: u8) {
         let mut a = self.register(Register::A);
         a ^= value;
@@ -636,6 +675,13 @@ impl Cpu {
     }
 
     #[inline]
+    fn xor_immediate(&mut self, mmu: &impl Mmu) -> usize {
+        let value = self.read(mmu);
+        self.xor_value(value);
+        8
+    }
+
+    #[inline]
     fn or_value(&mut self, value: u8) {
         let mut a = self.register(Register::A);
         a |= value;
@@ -657,6 +703,13 @@ impl Cpu {
     fn or_mem(&mut self, mmu: &impl Mmu) -> usize {
         let address = self.wide_register(WideRegister::HL);
         let value = mmu.read(address);
+        self.or_value(value);
+        8
+    }
+
+    #[inline]
+    fn or_immediate(&mut self, mmu: &impl Mmu) -> usize {
+        let value = self.read(mmu);
         self.or_value(value);
         8
     }
@@ -690,10 +743,24 @@ impl Cpu {
     }
 
     #[inline]
+    fn cp_immediate(&mut self, mmu: &impl Mmu) -> usize {
+        let value = self.read(mmu);
+        self.cp_value(value, false);
+        8
+    }
+
+    #[inline]
     fn pop_wide(&mut self, reg: WideRegister, mmu: &impl Mmu) -> usize {
         let value = self.pop_wide_value(mmu);
         self.set_wide_register(reg, value);
         12
+    }
+
+    #[inline]
+    fn push_wide(&mut self, reg: WideRegister, mmu: &mut impl Mmu) -> usize {
+        let value = self.wide_register(reg);
+        self.push_wide_value(value, mmu);
+        16
     }
 
     #[inline]
@@ -717,6 +784,157 @@ impl Cpu {
         } else {
             12
         }
+    }
+
+    #[inline]
+    fn call(&mut self, mmu: &mut impl Mmu) -> usize {
+        let address = self.read_wide(mmu);
+        self.push_wide(WideRegister::PC, mmu);
+        self.pc = address;
+        24
+    }
+
+    #[inline]
+    fn call_condition(&mut self, condition: Condition, mmu: &mut impl Mmu) -> usize {
+        let address = self.read_wide(mmu);
+        let met = match condition {
+            Condition::Zero => self.flag(Flag::Zero),
+            Condition::NotZero => !self.flag(Flag::Zero),
+            Condition::Carry => self.flag(Flag::Carry),
+            Condition::NotCarry => !self.flag(Flag::Carry),
+        };
+        if met {
+            self.push_wide(WideRegister::PC, mmu);
+            self.pc = address;
+            24
+        } else {
+            12
+        }
+    }
+
+    #[inline]
+    fn add_immediate(&mut self, mmu: &impl Mmu) -> usize {
+        let value = self.read(mmu);
+        self.add_value(value, false);
+        8
+    }
+
+    #[inline]
+    fn add_carry_immediate(&mut self, mmu: &impl Mmu) -> usize {
+        let value = self.read(mmu);
+        let carry = self.flag(Flag::Carry);
+        self.add_value(value, carry);
+        8
+    }
+
+    #[inline]
+    fn sub_immediate(&mut self, mmu: &impl Mmu) -> usize {
+        let value = self.read(mmu);
+        self.sub_value(value, false);
+        8
+    }
+
+    #[inline]
+    fn sub_carry_immediate(&mut self, mmu: &impl Mmu) -> usize {
+        let value = self.read(mmu);
+        let carry = self.flag(Flag::Carry);
+        self.sub_value(value, carry);
+        8
+    }
+
+    #[inline]
+    fn rst(&mut self, address: u16, mmu: &mut impl Mmu) -> usize {
+        self.push_wide(WideRegister::PC, mmu);
+        self.pc = address;
+        16
+    }
+
+    #[inline]
+    fn reti(&mut self, mmu: &impl Mmu) -> usize {
+        self.interrupts_enabled = true;
+        self.ret(mmu)
+    }
+
+    #[inline]
+    fn write_high_offset(&mut self, offset: u8, value: u8, mmu: &mut impl Mmu) {
+        let address = 0xFF00 + (offset as u16);
+        mmu.write(address, value);
+    }
+
+    #[inline]
+    fn write_high_immediate(&mut self, reg: Register, mmu: &mut impl Mmu) -> usize {
+        let offset = self.read(mmu);
+        let value = self.register(reg);
+        self.write_high_offset(offset, value, mmu);
+        12
+    }
+
+    #[inline]
+    fn write_high_register(&mut self, off: Register, reg: Register, mmu: &mut impl Mmu) -> usize {
+        let offset = self.register(off);
+        let value = self.register(reg);
+        self.write_high_offset(offset, value, mmu);
+        8
+    }
+
+    #[inline]
+    fn read_high_offset(&mut self, offset: u8, mmu: &mut impl Mmu) -> u8 {
+        let address = 0xFF00 + (offset as u16);
+        mmu.read(address)
+    }
+
+    #[inline]
+    fn read_high_immediate(&mut self, reg: Register, mmu: &mut impl Mmu) -> usize {
+        let offset = self.read(mmu);
+        let value = self.read_high_offset(offset, mmu);
+        self.set_register(reg, value);
+        12
+    }
+
+    #[inline]
+    fn read_high_register(&mut self, off: Register, reg: Register, mmu: &mut impl Mmu) -> usize {
+        let offset = self.register(off);
+        let value = self.read_high_offset(offset, mmu);
+        self.set_register(reg, value);
+        8
+    }
+
+    #[inline]
+    fn add_sp(&mut self, mmu: &impl Mmu) -> usize {
+        let sp = self.sp as i32;
+        let value = (self.read(mmu) as i8) as i32;
+        let overflow = sp + value;
+        self.set_flag(Flag::Negative, false);
+        self.set_flag(Flag::Zero, false);
+        self.set_flag(Flag::HalfCarry, (overflow & 0x0FFF) < (sp & 0x0FFFF));
+        self.sp = (overflow & 0xFFFF) as u16;
+        self.set_flag(Flag::Carry, overflow > 0xFFFF);
+        16
+    }
+
+    #[inline]
+    fn jmp_hl(&mut self, mmu: &impl Mmu) -> usize {
+        unimplemented!();
+        4
+    }
+
+    #[inline]
+    fn di(&mut self) -> usize {
+        self.interrupts_enabled = false;
+        4
+    }
+
+    #[inline]
+    fn ei(&mut self) -> usize {
+        self.interrupts_enabled = true;
+        4
+    }
+
+    #[inline]
+    fn copy_wide_register(&mut self, dest: WideRegister, src: WideRegister) -> usize {
+        let value = self.wide_register(src);
+        self.set_wide_register(dest, value);
+        8
     }
 
     pub fn cycle(&mut self, mmu: &mut impl Mmu) -> usize {
@@ -934,1189 +1152,77 @@ impl Cpu {
             0xC1 => { self.pop_wide(WideRegister::BC, mmu) }
             0xC2 => { self.jmp_condition(Condition::NotZero, mmu) }
             0xC3 => { self.jmp(mmu) }
+            0xC4 => { self.call_condition(Condition::NotZero, mmu) }
+            0xC5 => { self.push_wide(WideRegister::BC, mmu) }
+            0xC6 => { self.add_immediate(mmu) }
+            0xC7 => { self.rst(0x0000, mmu) }
+            0xC8 => { self.ret_condition(Condition::Zero, mmu) }
+            0xC9 => { self.ret(mmu) }
+            0xCA => { self.jmp_condition(Condition::Zero, mmu) }
+            0xCB => { self.cb(mmu) }
+            0xCC => { self.call_condition(Condition::Zero, mmu) }
+            0xCD => { self.call(mmu) }
+            0xCE => { self.add_carry_immediate(mmu) }
+            0xCF => { self.rst(0x0008, mmu) }
 
-            _ => unimplemented!(),
+            0xD0 => { self.ret_condition(Condition::NotCarry, mmu) }
+            0xD1 => { self.pop_wide(WideRegister::DE, mmu) }
+            0xD2 => { self.jmp_condition(Condition::NotCarry, mmu) }
+            0xD3 => { unimplemented!() }
+            0xD4 => { self.call_condition(Condition::NotCarry, mmu) }
+            0xD5 => { self.push_wide(WideRegister::DE, mmu) }
+            0xD6 => { self.sub_immediate(mmu) }
+            0xD7 => { self.rst(0x0010, mmu) }
+            0xD8 => { self.ret_condition(Condition::Carry, mmu) }
+            0xD9 => { self.reti(mmu) }
+            0xDA => { self.jmp_condition(Condition::Carry, mmu) }
+            0xDB => { unimplemented!() }
+            0xDC => { self.call_condition(Condition::Carry, mmu) }
+            0xDD => { unimplemented!() }
+            0xDE => { self.sub_carry_immediate(mmu) }
+            0xDF => { self.rst(0x0018, mmu) }
+
+            0xE0 => { self.write_high_immediate(Register::A, mmu) }
+            0xE1 => { self.pop_wide(WideRegister::HL, mmu) }
+            0xE2 => { self.write_high_register(Register::C, Register::A, mmu) }
+            0xE3 => { unimplemented!() }
+            0xE4 => { unimplemented!() }
+            0xE5 => { self.push_wide(WideRegister::HL, mmu) }
+            0xE6 => { self.and_immediate(mmu) }
+            0xE7 => { self.rst(0x0020, mmu) }
+            0xE8 => { self.add_sp(mmu) }
+            0xE9 => { self.jmp_hl(mmu) }
+            0xEA => { self.write_register_immediate(Register::A, mmu) }
+            0xEB => { unimplemented!() }
+            0xEC => { unimplemented!() }
+            0xED => { unimplemented!() }
+            0xEE => { self.xor_immediate(mmu) }
+            0xEF => { self.rst(0x0028, mmu) }
+
+            0xF0 => { self.read_high_immediate(Register::A, mmu) }
+            0xF1 => { self.pop_wide(WideRegister::AF, mmu) }
+            0xF2 => { self.read_high_register(Register::C, Register::A, mmu) }
+            0xF3 => { self.di() }
+            0xF4 => { unimplemented!() }
+            0xF5 => { self.push_wide(WideRegister::AF, mmu) }
+            0xF6 => { self.or_immediate(mmu) }
+            0xF7 => { self.rst(0x0030, mmu)}
+            0xF8 => { unimplemented!() }
+            0xF9 => { self.copy_wide_register(WideRegister::SP, WideRegister::HL) }
+            0xFA => { self.read_register_immediate(Register::A, mmu) }
+            0xFB => { self.ei() }
+            0xFC => { unimplemented!() }
+            0xFD => { unimplemented!() }
+            0xFE => { self.cp_immediate(mmu) }
+            0xFF => { self.rst(0x0038, mmu) }
+
+            _ => { unreachable!() }
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    impl Mmu for Vec<u8> {
-        fn read(&self, address: u16) -> u8 {
-            self[address as usize]
-        }
-
-        fn write(&mut self, address: u16, value: u8) {
-            self[address as usize] = value;
-        }
-    }
-
-    #[test]
-    fn nop() {
-        let mut cpu = Cpu::default();
-        assert_eq!(4, cpu.nop());
-    }
-
-    #[test]
-    fn read_wide_immediate() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0xAD, 0xDE);
-        assert_eq!(12, cpu.read_wide_immediate(WideRegister::BC, &mut mmu));
-        assert_eq!(0xDEAD, cpu.wide_register(WideRegister::BC));
-        assert_eq!(0x0002, cpu.pc);
-    }
-
-    #[test]
-    fn write_register() {
-        let mut cpu = Cpu::default();
-        cpu.set_wide_register(WideRegister::BC, 0x01);
-        cpu.set_register(Register::A, 0x42);
-        let mut mmu = vec!(0x00, 0x00);
-        assert_eq!(8, cpu.write_register(WideRegister::BC, Register::A, &mut mmu));
-        assert_eq!(0x42, mmu.read(0x01));
-    }
-
-    #[test]
-    fn inc_wide() {
-        let mut cpu = Cpu::default();
-        cpu.set_wide_register(WideRegister::BC, 0xFFFE);
-        assert_eq!(8, cpu.inc_wide(WideRegister::BC));
-        assert_eq!(0xFFFF, cpu.wide_register(WideRegister::BC));
-        assert_eq!(8, cpu.inc_wide(WideRegister::BC));
-        assert_eq!(0x0000, cpu.wide_register(WideRegister::BC));
-    }
-
-    #[test]
-    fn inc() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x0F);
-        assert_eq!(4, cpu.inc(Register::A));
-        assert_eq!(0x10, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::B, 0xFF);
-        assert_eq!(4, cpu.inc(Register::B));
-        assert_eq!(0x00, cpu.register(Register::B));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::C, 0x41);
-        assert_eq!(4, cpu.inc(Register::C));
-        assert_eq!(0x42, cpu.register(Register::C));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-    }
-
-    #[test]
-    fn dec() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x10);
-        assert_eq!(4, cpu.dec(Register::A));
-        assert_eq!(0x0F, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::B, 0x00);
-        assert_eq!(4, cpu.dec(Register::B));
-        assert_eq!(0xFF, cpu.register(Register::B));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::C, 0x01);
-        assert_eq!(4, cpu.dec(Register::C));
-        assert_eq!(0x00, cpu.register(Register::C));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-    }
-
-    #[test]
-    fn read_immediate() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        assert_eq!(8, cpu.read_immediate(Register::B, &mut mmu));
-        assert_eq!(0x42, cpu.register(Register::B));
-        assert_eq!(0x0001, cpu.pc);
-    }
-
-    #[test]
-    fn rlc() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::B, 0x08);
-        assert_eq!(8, cpu.rlc(Register::B));
-        assert_eq!(0x10, cpu.register(Register::B));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::C, 0x80);
-        assert_eq!(8, cpu.rlc(Register::C));
-        assert_eq!(0x01, cpu.register(Register::C));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::D, 0x00);
-        assert_eq!(8, cpu.rlc(Register::D));
-        assert_eq!(0x00, cpu.register(Register::D));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn rlca() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x08);
-        assert_eq!(4, cpu.rlca());
-        assert_eq!(0x10, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x80);
-        assert_eq!(4, cpu.rlca());
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x00);
-        assert_eq!(4, cpu.rlca());
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn write_stack_immediate() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x03, 0x00, 0x00, 0x00, 0x00);
-        cpu.set_wide_register(WideRegister::SP, 0xDEAD);
-        assert_eq!(12, cpu.write_stack_immediate(&mut mmu));
-        assert_eq!(0xAD, mmu.read(0x03));
-        assert_eq!(0xDE, mmu.read(0x04));
-    }
-
-    #[test]
-    fn add_wide() {
-        let mut cpu = Cpu::default();
-        cpu.set_wide_register(WideRegister::HL, 0x0040);
-        cpu.set_wide_register(WideRegister::BC, 0x0002);
-        assert_eq!(8, cpu.add_wide(WideRegister::BC));
-        assert_eq!(0x0042, cpu.wide_register(WideRegister::HL));
-        assert_eq!(0x0002, cpu.wide_register(WideRegister::BC));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_wide_register(WideRegister::HL, 0xFFFF);
-        cpu.set_wide_register(WideRegister::BC, 0x0001);
-        assert_eq!(8, cpu.add_wide(WideRegister::BC));
-        assert_eq!(0x0000, cpu.wide_register(WideRegister::HL));
-        assert_eq!(0x0001, cpu.wide_register(WideRegister::BC));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_wide_register(WideRegister::HL, 0x0FFE);
-        cpu.set_wide_register(WideRegister::BC, 0x0002);
-        assert_eq!(8, cpu.add_wide(WideRegister::BC));
-        assert_eq!(0x1000, cpu.wide_register(WideRegister::HL));
-        assert_eq!(0x0002, cpu.wide_register(WideRegister::BC));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-    }
-
-    #[test]
-    fn read_register() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x00, 0x42);
-        cpu.set_wide_register(WideRegister::BC, 0x02);
-        assert_eq!(8, cpu.read_register(WideRegister::BC, Register::A, &mut mmu));
-        assert_eq!(0x42, cpu.register(Register::A));
-    }
-
-    #[test]
-    fn dec_wide() {
-        let mut cpu = Cpu::default();
-        cpu.set_wide_register(WideRegister::BC, 0x0001);
-        assert_eq!(8, cpu.dec_wide(WideRegister::BC));
-        assert_eq!(0x0000, cpu.wide_register(WideRegister::BC));
-        assert_eq!(8, cpu.dec_wide(WideRegister::BC));
-        assert_eq!(0xFFFF, cpu.wide_register(WideRegister::BC));
-    }
-
-    #[test]
-    fn rrc() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::B, 0x10);
-        assert_eq!(8, cpu.rrc(Register::B));
-        assert_eq!(0x08, cpu.register(Register::B));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::C, 0x01);
-        assert_eq!(8, cpu.rrc(Register::C));
-        assert_eq!(0x80, cpu.register(Register::C));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::D, 0x00);
-        assert_eq!(8, cpu.rrc(Register::D));
-        assert_eq!(0x00, cpu.register(Register::D));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn rrca() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x10);
-        assert_eq!(4, cpu.rrca());
-        assert_eq!(0x08, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        assert_eq!(4, cpu.rrca());
-        assert_eq!(0x80, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x00);
-        assert_eq!(4, cpu.rrca());
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn stop() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00);
-        cpu.stop(&mut mmu);
-        assert_eq!(0x01, cpu.pc);
-        assert_eq!(true, cpu.stopped);
-    }
-
-    #[test]
-    fn rl() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::B, 0x08);
-        assert_eq!(8, cpu.rl(Register::B));
-        assert_eq!(0x10, cpu.register(Register::B));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::C, 0x80);
-        assert_eq!(8, cpu.rl(Register::C));
-        assert_eq!(0x00, cpu.register(Register::C));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::D, 0x00);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(8, cpu.rl(Register::D));
-        assert_eq!(0x01, cpu.register(Register::D));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn rla() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x08);
-        assert_eq!(4, cpu.rla());
-        assert_eq!(0x10, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x80);
-        assert_eq!(4, cpu.rla());
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x00);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(4, cpu.rla());
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn rr() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::B, 0x10);
-        assert_eq!(8, cpu.rr(Register::B));
-        assert_eq!(0x08, cpu.register(Register::B));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::C, 0x01);
-        assert_eq!(8, cpu.rr(Register::C));
-        assert_eq!(0x00, cpu.register(Register::C));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::D, 0x00);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(8, cpu.rr(Register::D));
-        assert_eq!(0x80, cpu.register(Register::D));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn rra() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x10);
-        assert_eq!(4, cpu.rra());
-        assert_eq!(0x08, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        assert_eq!(4, cpu.rra());
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x00);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(4, cpu.rra());
-        assert_eq!(0x80, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn jr() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        assert_eq!(12, cpu.jr(&mut mmu));
-        assert_eq!(0x0042, cpu.wide_register(WideRegister::PC));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, -0x01i8 as u8);
-        cpu.set_wide_register(WideRegister::PC, 0x0001);
-        assert_eq!(12, cpu.jr(&mut mmu));
-        assert_eq!(0x0000, cpu.wide_register(WideRegister::PC));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(-0x01i8 as u8);
-        assert_eq!(12, cpu.jr(&mut mmu));
-        assert_eq!(0xFFFF, cpu.wide_register(WideRegister::PC));
-    }
-
-    #[test]
-    fn jr_condition() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        assert_eq!(8, cpu.jr_condition(Condition::Zero, &mut mmu));
-        assert_eq!(0x0001, cpu.wide_register(WideRegister::PC));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        cpu.set_flag(Flag::Zero, true);
-        assert_eq!(12, cpu.jr_condition(Condition::Zero, &mut mmu));
-        assert_eq!(0x0042, cpu.wide_register(WideRegister::PC));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        assert_eq!(12, cpu.jr_condition(Condition::NotZero, &mut mmu));
-        assert_eq!(0x0042, cpu.wide_register(WideRegister::PC));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        cpu.set_flag(Flag::Zero, true);
-        assert_eq!(8, cpu.jr_condition(Condition::NotZero, &mut mmu));
-        assert_eq!(0x0001, cpu.wide_register(WideRegister::PC));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        assert_eq!(8, cpu.jr_condition(Condition::Carry, &mut mmu));
-        assert_eq!(0x0001, cpu.wide_register(WideRegister::PC));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(12, cpu.jr_condition(Condition::Carry, &mut mmu));
-        assert_eq!(0x0042, cpu.wide_register(WideRegister::PC));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        assert_eq!(12, cpu.jr_condition(Condition::NotCarry, &mut mmu));
-        assert_eq!(0x0042, cpu.wide_register(WideRegister::PC));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(8, cpu.jr_condition(Condition::NotCarry, &mut mmu));
-        assert_eq!(0x0001, cpu.wide_register(WideRegister::PC));
-    }
-
-    #[test]
-    fn write_a_hli() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00);
-        cpu.set_register(Register::A, 0x42);
-        assert_eq!(8, cpu.write_a_hli(&mut mmu));
-        assert_eq!(0x0001, cpu.wide_register(WideRegister::HL));
-        assert_eq!(0x42, mmu.read(0x0000));
-    }
-
-    #[test]
-    fn read_a_hli() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        assert_eq!(8, cpu.read_a_hli(&mut mmu));
-        assert_eq!(0x0001, cpu.wide_register(WideRegister::HL));
-        assert_eq!(0x42, cpu.register(Register::A));
-    }
-
-    #[test]
-    fn cpl() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0xAA);
-        assert_eq!(4, cpu.cpl());
-        assert_eq!(0x55, cpu.register(Register::A));
-    }
-
-    #[test]
-    fn write_a_hld() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00);
-        cpu.set_register(Register::A, 0x42);
-        assert_eq!(8, cpu.write_a_hld(&mut mmu));
-        assert_eq!(0xFFFF, cpu.wide_register(WideRegister::HL));
-        assert_eq!(0x42, mmu.read(0x0000));
-    }
-
-    #[test]
-    fn read_a_hld() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42);
-        assert_eq!(8, cpu.read_a_hld(&mut mmu));
-        assert_eq!(0xFFFF, cpu.wide_register(WideRegister::HL));
-        assert_eq!(0x42, cpu.register(Register::A));
-    }
-
-    #[test]
-    fn daa() {
-
-    }
-
-    #[test]
-    fn scf() {
-        let mut cpu = Cpu::default();
-        cpu.set_flag(Flag::Negative, true);
-        cpu.set_flag(Flag::HalfCarry, true);
-        assert_eq!(4, cpu.scf());
-        assert_eq!(true, cpu.flag(Flag::Carry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-    }
-
-    #[test]
-    fn ccf() {
-        let mut cpu = Cpu::default();
-        cpu.set_flag(Flag::Negative, true);
-        cpu.set_flag(Flag::HalfCarry, true);
-        assert_eq!(4, cpu.ccf());
-        assert_eq!(true, cpu.flag(Flag::Carry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_flag(Flag::Negative, true);
-        cpu.set_flag(Flag::HalfCarry, true);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(4, cpu.ccf());
-        assert_eq!(false, cpu.flag(Flag::Carry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-    }
-
-    #[test]
-    fn inc_mem() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x0F);
-        cpu.set_wide_register(WideRegister::HL, 0x0001);
-        assert_eq!(12, cpu.inc_mem(&mut mmu));
-        assert_eq!(0x10, mmu.read(0x0001));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0xFF);
-        cpu.set_wide_register(WideRegister::HL, 0x0001);
-        assert_eq!(12, cpu.inc_mem(&mut mmu));
-        assert_eq!(0x00, mmu.read(0x0001));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x41);
-        cpu.set_wide_register(WideRegister::HL, 0x0001);
-        assert_eq!(12, cpu.inc_mem(&mut mmu));
-        assert_eq!(0x42, mmu.read(0x0001));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-    }
-
-    #[test]
-    fn dec_mem() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x10);
-        cpu.set_wide_register(WideRegister::HL, 0x0001);
-        assert_eq!(12, cpu.dec_mem(&mut mmu));
-        assert_eq!(0x0F, mmu.read(0x0001));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x00);
-        cpu.set_wide_register(WideRegister::HL, 0x0001);
-        assert_eq!(12, cpu.dec_mem(&mut mmu));
-        assert_eq!(0xFF, mmu.read(0x0001));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x0001);
-        assert_eq!(12, cpu.dec_mem(&mut mmu));
-        assert_eq!(0x00, mmu.read(0x0001));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-    }
-
-    #[test]
-    fn write_mem_immediate() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x42, 0x00, 0x00, 0x00);
-        cpu.set_wide_register(WideRegister::HL, 0x0002);
-        assert_eq!(12, cpu.write_mem_immediate(&mut mmu));
-        assert_eq!(0x42, mmu.read(0x0002));
-    }
-
-    #[test]
-    fn copy_register() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::E, 0x42);
-        assert_eq!(4, cpu.copy_register(Register::B, Register::E));
-        assert_eq!(0x42, cpu.register(Register::B));
-        assert_eq!(4, cpu.copy_register(Register::A, Register::B));
-        assert_eq!(0x42, cpu.register(Register::A));
-    }
-
-    #[test]
-    fn add() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x0F);
-        cpu.set_register(Register::B, 0x02);
-        assert_eq!(4, cpu.add(Register::B));
-        assert_eq!(0x11, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0xFF);
-        cpu.set_register(Register::C, 0x02);
-        assert_eq!(4, cpu.add(Register::C));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_register(Register::H, 0xFF);
-        assert_eq!(4, cpu.add(Register::H));
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn add_mem() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x02);
-        cpu.set_register(Register::A, 0x0F);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.add_mem(&mut mmu));
-        assert_eq!(0x11, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x02);
-        cpu.set_register(Register::A, 0xFF);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.add_mem(&mut mmu));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0xFF);
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.add_mem(&mut mmu));
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn add_carry() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x0E);
-        cpu.set_register(Register::B, 0x01);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(4, cpu.add_carry(Register::B));
-        assert_eq!(0x10, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0xFE);
-        cpu.set_register(Register::L, 0x01);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(4, cpu.add_carry(Register::L));
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0xFE);
-        cpu.set_register(Register::L, 0x01);
-        cpu.set_flag(Flag::Carry, false);
-        assert_eq!(4, cpu.add_carry(Register::L));
-        assert_eq!(0xFF, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn add_carry_mem() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x01);
-        cpu.set_register(Register::A, 0x0E);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(8, cpu.add_carry_mem(&mut mmu));
-        assert_eq!(0x10, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x01);
-        cpu.set_register(Register::A, 0xFE);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(8, cpu.add_carry_mem(&mut mmu));
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x01);
-        cpu.set_register(Register::A, 0xFE);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        cpu.set_flag(Flag::Carry, false);
-        assert_eq!(8, cpu.add_carry_mem(&mut mmu));
-        assert_eq!(0xFF, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn sub() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x10);
-        cpu.set_register(Register::B, 0x02);
-        assert_eq!(4, cpu.sub(Register::B));
-        assert_eq!(0x0E, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x00);
-        cpu.set_register(Register::C, 0x02);
-        assert_eq!(4, cpu.sub(Register::C));
-        assert_eq!(0xFE, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_register(Register::H, 0xFF);
-        assert_eq!(4, cpu.sub(Register::H));
-        assert_eq!(0x02, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn sub_mem() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x02);
-        cpu.set_register(Register::A, 0x10);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.sub_mem(&mut mmu));
-        assert_eq!(0x0E, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x02);
-        cpu.set_register(Register::A, 0x00);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.sub_mem(&mut mmu));
-        assert_eq!(0xFE, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0xFF);
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.sub_mem(&mut mmu));
-        assert_eq!(0x02, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn sub_carry() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x11);
-        cpu.set_register(Register::B, 0x01);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(4, cpu.sub_carry(Register::B));
-        assert_eq!(0x0F, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x00);
-        cpu.set_register(Register::L, 0xFF);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(4, cpu.sub_carry(Register::L));
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x00);
-        cpu.set_register(Register::L, 0xFF);
-        cpu.set_flag(Flag::Carry, false);
-        assert_eq!(4, cpu.sub_carry(Register::L));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn sub_carry_mem() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x01);
-        cpu.set_register(Register::A, 0x11);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(8, cpu.sub_carry_mem(&mut mmu));
-        assert_eq!(0x0F, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0xFF);
-        cpu.set_register(Register::A, 0x00);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        cpu.set_flag(Flag::Carry, true);
-        assert_eq!(8, cpu.sub_carry_mem(&mut mmu));
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0xFF);
-        cpu.set_register(Register::A, 0x00);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        cpu.set_flag(Flag::Carry, false);
-        assert_eq!(8, cpu.sub_carry_mem(&mut mmu));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn and() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_register(Register::B, 0x01);
-        assert_eq!(4, cpu.and(Register::B));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_register(Register::C, 0x00);
-        assert_eq!(4, cpu.and(Register::C));
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn and_mem() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x01);
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.and_mem(&mut mmu));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x00);
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.and_mem(&mut mmu));
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn xor() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_register(Register::B, 0x01);
-        assert_eq!(4, cpu.xor(Register::B));
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_register(Register::C, 0x00);
-        assert_eq!(4, cpu.xor(Register::C));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn xor_mem() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x01);
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.xor_mem(&mut mmu));
-        assert_eq!(0x00, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x00);
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.xor_mem(&mut mmu));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn or() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_register(Register::B, 0x01);
-        assert_eq!(4, cpu.or(Register::B));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_register(Register::C, 0x00);
-        assert_eq!(4, cpu.or(Register::C));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn or_mem() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x01);
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.or_mem(&mut mmu));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x00);
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.or_mem(&mut mmu));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(false, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn cp() {
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_register(Register::B, 0x01);
-        assert_eq!(4, cpu.cp(Register::B));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_register(Register::C, 0x00);
-        assert_eq!(4, cpu.cp(Register::C));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_register(Register::H, 0x02);
-        assert_eq!(4, cpu.cp(Register::H));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn cp_mem() {
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x01);
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.cp_mem(&mut mmu));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(true, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x00);
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.cp_mem(&mut mmu));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(false, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(false, cpu.flag(Flag::Carry));
-
-        let mut cpu = Cpu::default();
-        let mut mmu = vec!(0x00, 0x02);
-        cpu.set_register(Register::A, 0x01);
-        cpu.set_wide_register(WideRegister::HL, 0x01);
-        assert_eq!(8, cpu.cp_mem(&mut mmu));
-        assert_eq!(0x01, cpu.register(Register::A));
-        assert_eq!(false, cpu.flag(Flag::Zero));
-        assert_eq!(true, cpu.flag(Flag::HalfCarry));
-        assert_eq!(true, cpu.flag(Flag::Negative));
-        assert_eq!(true, cpu.flag(Flag::Carry));
-    }
-
-    #[test]
-    fn ret() {
-
-    }
-
-    #[test]
-    fn ret_condition() {
-
-    }
-
-    #[test]
-    fn pop_wide() {
-
-    }
-
-    #[test]
-    fn jmp_condition() {
-
-    }
-
-    #[test]
-    fn jmp() {
-
+    #[inline]
+    fn cb(&mut self, mmu: &mut impl Mmu) -> usize {
+        unimplemented!();
+        0
     }
 }
