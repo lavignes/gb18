@@ -150,6 +150,11 @@ fn rlc() {
 }
 
 #[test]
+fn rlc_mem() {
+    // TODO: this
+}
+
+#[test]
 fn rlca() {
     let mut cpu = Cpu::default();
     cpu.set_register(Register::A, 0x08);
