@@ -154,7 +154,7 @@ impl Cpu {
     }
 
     #[inline]
-    fn nop(&self) -> usize {
+    fn nop(&mut self) -> usize {
         4
     }
 
@@ -243,42 +243,87 @@ impl Cpu {
     }
 
     #[inline]
-    fn rl(&mut self, reg: Register) -> usize {
+    fn rl_value(&mut self, value: u8) -> u8 {
         self.set_flag(Flag::Negative, false);
         self.set_flag(Flag::HalfCarry, false);
-        let mut value = self.register(reg);
         let carry = (value & 0x80) >> 7;
-        value = (value << 1) | if self.flag(Flag::Carry) { 0x01 } else { 0x00 };
-        self.set_register(reg, value);
+        let value = (value << 1) | if self.flag(Flag::Carry) { 0x01 } else { 0x00 };
         self.set_flag(Flag::Carry, carry != 0);
         self.set_flag(Flag::Zero, value == 0x00);
+        value
+    }
+
+    #[inline]
+    fn rl(&mut self, reg: Register) -> usize {
+        let mut value = self.register(reg);
+        value = self.rl_value(value);
+        self.set_register(reg, value);
         8
+    }
+
+    #[inline]
+    fn rl_mem(&mut self, mmu: &mut impl Mmu) -> usize {
+        let address = self.wide_register(WideRegister::HL);
+        let mut value = mmu.read(address);
+        value = self.rl_value(value);
+        mmu.write(address, value);
+        16
+    }
+
+    #[inline]
+    fn rrc_value(&mut self, value: u8) -> u8 {
+        self.set_flag(Flag::Negative, false);
+        self.set_flag(Flag::HalfCarry, false);
+        let carry = (value & 0x01) << 7;
+        let value = (value >> 1) | carry;
+        self.set_flag(Flag::Carry, carry != 0);
+        self.set_flag(Flag::Zero, value == 0x00);
+        value
     }
 
     #[inline]
     fn rrc(&mut self, reg: Register) -> usize {
-        self.set_flag(Flag::Negative, false);
-        self.set_flag(Flag::HalfCarry, false);
         let mut value = self.register(reg);
-        let carry = (value & 0x01) << 7;
-        value = (value >> 1) | carry;
+        value = self.rrc_value(value);
         self.set_register(reg, value);
-        self.set_flag(Flag::Carry, carry != 0);
-        self.set_flag(Flag::Zero, value == 0x00);
         8
     }
 
     #[inline]
-    fn rr(&mut self, reg: Register) -> usize {
+    fn rrc_mem(&mut self, mmu: &mut impl Mmu) -> usize {
+        let address = self.wide_register(WideRegister::HL);
+        let mut value = mmu.read(address);
+        value = self.rrc_value(value);
+        mmu.write(address, value);
+        16
+    }
+
+    #[inline]
+    fn rr_value(&mut self, value: u8) -> u8 {
         self.set_flag(Flag::Negative, false);
         self.set_flag(Flag::HalfCarry, false);
-        let mut value = self.register(reg);
         let carry = (value & 0x01) << 7;
-        value = (value >> 1) | if self.flag(Flag::Carry) { 0x80 } else { 0x00 };
-        self.set_register(reg, value);
+        let value = (value >> 1) | if self.flag(Flag::Carry) { 0x80 } else { 0x00 };
         self.set_flag(Flag::Carry, carry != 0);
         self.set_flag(Flag::Zero, value == 0x00);
+        value
+    }
+
+    #[inline]
+    fn rr(&mut self, reg: Register) -> usize {
+        let mut value = self.register(reg);
+        value = self.rr_value(value);
+        self.set_register(reg, value);
         8
+    }
+
+    #[inline]
+    fn rr_mem(&mut self, mmu: &mut impl Mmu) -> usize {
+        let address = self.wide_register(WideRegister::HL);
+        let mut value = mmu.read(address);
+        value = self.rr_value(value);
+        mmu.write(address, value);
+        16
     }
 
     #[inline]
@@ -292,21 +337,27 @@ impl Cpu {
 
     #[inline]
     fn rla(&mut self) -> usize {
-        self.rl(Register::A);
+        let mut value = self.register(Register::A);
+        value = self.rl_value(value);
+        self.set_register(Register::A, value);
         self.set_flag(Flag::Zero, false);
         4
     }
 
     #[inline]
     fn rrca(&mut self) -> usize {
-        self.rrc(Register::A);
+        let mut value = self.register(Register::A);
+        value = self.rrc_value(value);
+        self.set_register(Register::A, value);
         self.set_flag(Flag::Zero, false);
         4
     }
 
     #[inline]
     fn rra(&mut self) -> usize {
-        self.rr(Register::A);
+        let mut value = self.register(Register::A);
+        value = self.rr_value(value);
+        self.set_register(Register::A, value);
         self.set_flag(Flag::Zero, false);
         4
     }
@@ -1247,6 +1298,32 @@ impl Cpu {
             0x04 => { self.rlc(Register::H) }
             0x05 => { self.rlc(Register::L) }
             0x06 => { self.rlc_mem(mmu) }
+            0x07 => { self.rlc(Register::A) }
+            0x08 => { self.rrc(Register::B) }
+            0x09 => { self.rrc(Register::C) }
+            0x0A => { self.rrc(Register::D) }
+            0x0B => { self.rrc(Register::E) }
+            0x0C => { self.rrc(Register::H) }
+            0x0D => { self.rrc(Register::L) }
+            0x0E => { self.rrc_mem(mmu) }
+            0x0F => { self.rrc(Register::A) }
+
+            0x10 => { self.rl(Register::B) }
+            0x11 => { self.rl(Register::C) }
+            0x12 => { self.rl(Register::D) }
+            0x13 => { self.rl(Register::E) }
+            0x14 => { self.rl(Register::H) }
+            0x15 => { self.rl(Register::L) }
+            0x16 => { self.rl_mem(mmu) }
+            0x17 => { self.rl(Register::A) }
+            0x18 => { self.rr(Register::B) }
+            0x19 => { self.rr(Register::C) }
+            0x1A => { self.rr(Register::D) }
+            0x1B => { self.rr(Register::E) }
+            0x1C => { self.rr(Register::H) }
+            0x1D => { self.rr(Register::L) }
+            0x1E => { self.rr_mem(mmu) }
+            0x1F => { self.rr(Register::A) }
 
             _ => { unreachable!() }
         }

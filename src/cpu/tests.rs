@@ -307,6 +307,11 @@ fn rrca() {
 }
 
 #[test]
+fn rrc_mem() {
+    // TODO: this
+}
+
+#[test]
 fn stop() {
     let mut cpu = Cpu::default();
     let mut mmu = vec!(0x00);
@@ -378,6 +383,11 @@ fn rla() {
 }
 
 #[test]
+fn rl_mem() {
+    // TODO: this
+}
+
+#[test]
 fn rr() {
     let mut cpu = Cpu::default();
     cpu.set_register(Register::B, 0x10);
@@ -437,6 +447,11 @@ fn rra() {
     assert_eq!(false, cpu.flag(Flag::HalfCarry));
     assert_eq!(false, cpu.flag(Flag::Zero));
     assert_eq!(false, cpu.flag(Flag::Carry));
+}
+
+#[test]
+fn rr_mem() {
+    // TODO: this
 }
 
 #[test]
