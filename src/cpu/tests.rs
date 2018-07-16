@@ -1542,3 +1542,73 @@ fn read_register_immediate() {
 fn copy_wide_register() {
 
 }
+
+#[test]
+fn sla() {
+
+}
+
+#[test]
+fn sla_mem() {
+
+}
+
+#[test]
+fn sra() {
+
+}
+
+#[test]
+fn sra_mem() {
+
+}
+
+#[test]
+fn swap() {
+
+}
+
+#[test]
+fn swap_mem() {
+
+}
+
+#[test]
+fn srl() {
+
+}
+
+#[test]
+fn srl_mem() {
+
+}
+
+#[test]
+fn bit() {
+
+}
+
+#[test]
+fn bit_mem() {
+
+}
+
+#[test]
+fn reset_bit() {
+
+}
+
+#[test]
+fn reset_bit_mem() {
+
+}
+
+#[test]
+fn set_bit() {
+
+}
+
+#[test]
+fn set_bit_mem() {
+
+}

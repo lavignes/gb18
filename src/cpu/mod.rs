@@ -363,6 +363,88 @@ impl Cpu {
     }
 
     #[inline]
+    fn sla_value(&mut self, value: u8) -> u8 {
+        self.set_flag(Flag::Negative, false);
+        self.set_flag(Flag::HalfCarry, false);
+        let carry = value & 0x80;
+        let value = value << 1;
+        self.set_flag(Flag::Carry, carry != 0);
+        self.set_flag(Flag::Zero, value == 0x00);
+        value
+    }
+
+    #[inline]
+    fn sla(&mut self, reg: Register) -> usize {
+        let mut value = self.register(reg);
+        value = self.sla_value(value);
+        self.set_register(reg, value);
+        8
+    }
+
+    #[inline]
+    fn sla_mem(&mut self, mmu: &mut impl Mmu) -> usize {
+        let address = self.wide_register(WideRegister::HL);
+        let mut value = mmu.read(address);
+        value = self.sla_value(value);
+        mmu.write(address, value);
+        16
+    }
+
+    #[inline]
+    fn sra_value(&mut self, value: u8) -> u8 {
+        self.set_flag(Flag::Negative, false);
+        self.set_flag(Flag::HalfCarry, false);
+        let value = (value as i8) >> 1;
+        self.set_flag(Flag::Carry, false);
+        self.set_flag(Flag::Zero, value == 0x00);
+        value as u8
+    }
+
+    #[inline]
+    fn sra(&mut self, reg: Register) -> usize {
+        let mut value = self.register(reg);
+        value = self.sra_value(value);
+        self.set_register(reg, value);
+        8
+    }
+
+    #[inline]
+    fn sra_mem(&mut self, mmu: &mut impl Mmu) -> usize {
+        let address = self.wide_register(WideRegister::HL);
+        let mut value = mmu.read(address);
+        value = self.sra_value(value);
+        mmu.write(address, value);
+        16
+    }
+
+    #[inline]
+    fn srl_value(&mut self, value: u8) -> u8 {
+        self.set_flag(Flag::Negative, false);
+        self.set_flag(Flag::HalfCarry, false);
+        let value = value >> 1;
+        self.set_flag(Flag::Carry, false);
+        self.set_flag(Flag::Zero, value == 0x00);
+        value
+    }
+
+    #[inline]
+    fn srl(&mut self, reg: Register) -> usize {
+        let mut value = self.register(reg);
+        value = self.srl_value(value);
+        self.set_register(reg, value);
+        8
+    }
+
+    #[inline]
+    fn srl_mem(&mut self, mmu: &mut impl Mmu) -> usize {
+        let address = self.wide_register(WideRegister::HL);
+        let mut value = mmu.read(address);
+        value = self.srl_value(value);
+        mmu.write(address, value);
+        16
+    }
+
+    #[inline]
     fn write_wide(&self, address: u16, value: u16, mmu: &mut impl Mmu,) {
         mmu.write(address, (value & 0x00FF) as u8);
         mmu.write(address.wrapping_add(1), ((value >> 8) & 0x00FF) as u8);
@@ -1004,6 +1086,99 @@ impl Cpu {
         8
     }
 
+    #[inline]
+    fn swap_value(&mut self, value: u8) -> u8 {
+        self.set_flag(Flag::Carry, false);
+        self.set_flag(Flag::HalfCarry, false);
+        self.set_flag(Flag::Negative, false);
+        let value = ((value << 4) & 0xF0) | ((value >> 4) & 0x0F);
+        self.set_flag(Flag::Zero, value == 0x00);
+        value
+    }
+
+    #[inline]
+    fn swap(&mut self, reg: Register) -> usize {
+        let mut value = self.register(reg);
+        value = self.swap_value(value);
+        self.set_register(reg, value);
+        8
+    }
+
+    #[inline]
+    fn swap_mem(&mut self, mmu: &mut impl Mmu) -> usize {
+        let address = self.wide_register(WideRegister::HL);
+        let mut value = mmu.read(address);
+        value = self.swap_value(value);
+        mmu.write(address, value);
+        16
+    }
+
+    #[inline]
+    fn bit_value(&mut self, bit: u8, value: u8) {
+        self.set_flag(Flag::Negative, false);
+        self.set_flag(Flag::HalfCarry, true);
+        self.set_flag(Flag::Zero, (value & (1 << bit)) == 0x00);
+    }
+
+    #[inline]
+    fn bit(&mut self, bit: u8, reg: Register) -> usize {
+        let value = self.register(reg);
+        self.bit_value(bit, value);
+        8
+    }
+
+    #[inline]
+    fn bit_mem(&mut self, bit: u8, mmu: &impl Mmu) -> usize {
+        let address = self.wide_register(WideRegister::HL);
+        let value = mmu.read(address);
+        self.bit_value(bit, value);
+        16
+    }
+
+    #[inline]
+    fn reset_bit_value(&mut self, bit: u8, value: u8) -> u8 {
+        value & !(1 << bit)
+    }
+
+    #[inline]
+    fn reset_bit(&mut self, bit: u8, reg: Register) -> usize {
+        let mut value = self.register(reg);
+        value = self.reset_bit_value(bit, value);
+        self.set_register(reg, value);
+        8
+    }
+
+    #[inline]
+    fn reset_bit_mem(&mut self, bit: u8, mmu: &mut impl Mmu) -> usize {
+        let address = self.wide_register(WideRegister::HL);
+        let mut value = mmu.read(address);
+        value = self.reset_bit_value(bit, value);
+        mmu.write(address, value);
+        16
+    }
+
+    #[inline]
+    fn set_bit_value(&mut self, bit: u8, value: u8) -> u8 {
+        value | (1 << bit)
+    }
+
+    #[inline]
+    fn set_bit(&mut self, bit: u8, reg: Register) -> usize {
+        let mut value = self.register(reg);
+        value = self.set_bit_value(bit, value);
+        self.set_register(reg, value);
+        8
+    }
+
+    #[inline]
+    fn set_bit_mem(&mut self, bit: u8, mmu: &mut impl Mmu) -> usize {
+        let address = self.wide_register(WideRegister::HL);
+        let mut value = mmu.read(address);
+        value = self.set_bit_value(bit, value);
+        mmu.write(address, value);
+        16
+    }
+
     pub fn cycle(&mut self, mmu: &mut impl Mmu) -> usize {
         let opcode = self.read(mmu);
         if self.halted {
@@ -1324,6 +1499,244 @@ impl Cpu {
             0x1D => { self.rr(Register::L) }
             0x1E => { self.rr_mem(mmu) }
             0x1F => { self.rr(Register::A) }
+
+            0x20 => { self.sla(Register::B) }
+            0x21 => { self.sla(Register::C) }
+            0x22 => { self.sla(Register::D) }
+            0x23 => { self.sla(Register::E) }
+            0x24 => { self.sla(Register::H) }
+            0x25 => { self.sla(Register::L) }
+            0x26 => { self.sla_mem(mmu) }
+            0x27 => { self.sla(Register::A) }
+            0x28 => { self.sra(Register::B) }
+            0x29 => { self.sra(Register::C) }
+            0x2A => { self.sra(Register::D) }
+            0x2B => { self.sra(Register::E) }
+            0x2C => { self.sra(Register::H) }
+            0x2D => { self.sra(Register::L) }
+            0x2E => { self.sra_mem(mmu) }
+            0x2F => { self.sra(Register::A) }
+
+            0x30 => { self.swap(Register::B) }
+            0x31 => { self.swap(Register::C) }
+            0x32 => { self.swap(Register::D) }
+            0x33 => { self.swap(Register::E) }
+            0x34 => { self.swap(Register::H) }
+            0x35 => { self.swap(Register::L) }
+            0x36 => { self.swap_mem(mmu) }
+            0x37 => { self.swap(Register::A) }
+            0x38 => { self.srl(Register::B) }
+            0x39 => { self.srl(Register::C) }
+            0x3A => { self.srl(Register::D) }
+            0x3B => { self.srl(Register::E) }
+            0x3C => { self.srl(Register::H) }
+            0x3D => { self.srl(Register::L) }
+            0x3E => { self.srl_mem(mmu) }
+            0x3F => { self.srl(Register::A) }
+
+            0x40 => { self.bit(0x00, Register::B) }
+            0x41 => { self.bit(0x00, Register::C) }
+            0x42 => { self.bit(0x00, Register::D) }
+            0x43 => { self.bit(0x00, Register::E) }
+            0x44 => { self.bit(0x00, Register::H) }
+            0x45 => { self.bit(0x00, Register::L) }
+            0x46 => { self.bit_mem(0x00, mmu) }
+            0x47 => { self.bit(0x00, Register::A) }
+            0x48 => { self.bit(0x01, Register::B) }
+            0x49 => { self.bit(0x01, Register::C) }
+            0x4A => { self.bit(0x01, Register::D) }
+            0x4B => { self.bit(0x01, Register::E) }
+            0x4C => { self.bit(0x01, Register::H) }
+            0x4D => { self.bit(0x01, Register::L) }
+            0x4E => { self.bit_mem(0x01, mmu) }
+            0x4F => { self.bit(0x01, Register::A) }
+
+            0x50 => { self.bit(0x02, Register::B) }
+            0x51 => { self.bit(0x02, Register::C) }
+            0x52 => { self.bit(0x02, Register::D) }
+            0x53 => { self.bit(0x02, Register::E) }
+            0x54 => { self.bit(0x02, Register::H) }
+            0x55 => { self.bit(0x02, Register::L) }
+            0x56 => { self.bit_mem(0x02, mmu) }
+            0x57 => { self.bit(0x02, Register::A) }
+            0x58 => { self.bit(0x03, Register::B) }
+            0x59 => { self.bit(0x03, Register::C) }
+            0x5A => { self.bit(0x03, Register::D) }
+            0x5B => { self.bit(0x03, Register::E) }
+            0x5C => { self.bit(0x03, Register::H) }
+            0x5D => { self.bit(0x03, Register::L) }
+            0x5E => { self.bit_mem(0x03, mmu) }
+            0x5F => { self.bit(0x03, Register::A) }
+
+            0x60 => { self.bit(0x04, Register::B) }
+            0x61 => { self.bit(0x04, Register::C) }
+            0x62 => { self.bit(0x04, Register::D) }
+            0x63 => { self.bit(0x04, Register::E) }
+            0x64 => { self.bit(0x04, Register::H) }
+            0x65 => { self.bit(0x04, Register::L) }
+            0x66 => { self.bit_mem(0x04, mmu) }
+            0x67 => { self.bit(0x04, Register::A) }
+            0x68 => { self.bit(0x05, Register::B) }
+            0x69 => { self.bit(0x05, Register::C) }
+            0x6A => { self.bit(0x05, Register::D) }
+            0x6B => { self.bit(0x05, Register::E) }
+            0x6C => { self.bit(0x05, Register::H) }
+            0x6D => { self.bit(0x05, Register::L) }
+            0x6E => { self.bit_mem(0x05, mmu) }
+            0x6F => { self.bit(0x05, Register::A) }
+
+            0x70 => { self.bit(0x06, Register::B) }
+            0x71 => { self.bit(0x06, Register::C) }
+            0x72 => { self.bit(0x06, Register::D) }
+            0x73 => { self.bit(0x06, Register::E) }
+            0x74 => { self.bit(0x06, Register::H) }
+            0x75 => { self.bit(0x06, Register::L) }
+            0x76 => { self.bit_mem(0x06, mmu) }
+            0x77 => { self.bit(0x06, Register::A) }
+            0x78 => { self.bit(0x07, Register::B) }
+            0x79 => { self.bit(0x07, Register::C) }
+            0x7A => { self.bit(0x07, Register::D) }
+            0x7B => { self.bit(0x07, Register::E) }
+            0x7C => { self.bit(0x07, Register::H) }
+            0x7D => { self.bit(0x07, Register::L) }
+            0x7E => { self.bit_mem(0x07, mmu) }
+            0x7F => { self.bit(0x07, Register::A) }
+
+            0x80 => { self.reset_bit(0x00, Register::B) }
+            0x81 => { self.reset_bit(0x00, Register::C) }
+            0x82 => { self.reset_bit(0x00, Register::D) }
+            0x83 => { self.reset_bit(0x00, Register::E) }
+            0x84 => { self.reset_bit(0x00, Register::H) }
+            0x85 => { self.reset_bit(0x00, Register::L) }
+            0x86 => { self.reset_bit_mem(0x00, mmu) }
+            0x87 => { self.reset_bit(0x00, Register::A) }
+            0x88 => { self.reset_bit(0x01, Register::B) }
+            0x89 => { self.reset_bit(0x01, Register::C) }
+            0x8A => { self.reset_bit(0x01, Register::D) }
+            0x8B => { self.reset_bit(0x01, Register::E) }
+            0x8C => { self.reset_bit(0x01, Register::H) }
+            0x8D => { self.reset_bit(0x01, Register::L) }
+            0x8E => { self.reset_bit_mem(0x01, mmu) }
+            0x8F => { self.reset_bit(0x01, Register::A) }
+
+            0x90 => { self.reset_bit(0x02, Register::B) }
+            0x91 => { self.reset_bit(0x02, Register::C) }
+            0x92 => { self.reset_bit(0x02, Register::D) }
+            0x93 => { self.reset_bit(0x02, Register::E) }
+            0x94 => { self.reset_bit(0x02, Register::H) }
+            0x95 => { self.reset_bit(0x02, Register::L) }
+            0x96 => { self.reset_bit_mem(0x02, mmu) }
+            0x97 => { self.reset_bit(0x02, Register::A) }
+            0x98 => { self.reset_bit(0x03, Register::B) }
+            0x99 => { self.reset_bit(0x03, Register::C) }
+            0x9A => { self.reset_bit(0x03, Register::D) }
+            0x9B => { self.reset_bit(0x03, Register::E) }
+            0x9C => { self.reset_bit(0x03, Register::H) }
+            0x9D => { self.reset_bit(0x03, Register::L) }
+            0x9E => { self.reset_bit_mem(0x03, mmu) }
+            0x9F => { self.reset_bit(0x03, Register::A) }
+
+            0xA0 => { self.reset_bit(0x04, Register::B) }
+            0xA1 => { self.reset_bit(0x04, Register::C) }
+            0xA2 => { self.reset_bit(0x04, Register::D) }
+            0xA3 => { self.reset_bit(0x04, Register::E) }
+            0xA4 => { self.reset_bit(0x04, Register::H) }
+            0xA5 => { self.reset_bit(0x04, Register::L) }
+            0xA6 => { self.reset_bit_mem(0x04, mmu) }
+            0xA7 => { self.reset_bit(0x04, Register::A) }
+            0xA8 => { self.reset_bit(0x05, Register::B) }
+            0xA9 => { self.reset_bit(0x05, Register::C) }
+            0xAA => { self.reset_bit(0x05, Register::D) }
+            0xAB => { self.reset_bit(0x05, Register::E) }
+            0xAC => { self.reset_bit(0x05, Register::H) }
+            0xAD => { self.reset_bit(0x05, Register::L) }
+            0xAE => { self.reset_bit_mem(0x05, mmu) }
+            0xAF => { self.reset_bit(0x05, Register::A) }
+
+            0xB0 => { self.reset_bit(0x06, Register::B) }
+            0xB1 => { self.reset_bit(0x06, Register::C) }
+            0xB2 => { self.reset_bit(0x06, Register::D) }
+            0xB3 => { self.reset_bit(0x06, Register::E) }
+            0xB4 => { self.reset_bit(0x06, Register::H) }
+            0xB5 => { self.reset_bit(0x06, Register::L) }
+            0xB6 => { self.reset_bit_mem(0x06, mmu) }
+            0xB7 => { self.reset_bit(0x06, Register::A) }
+            0xB8 => { self.reset_bit(0x07, Register::B) }
+            0xB9 => { self.reset_bit(0x07, Register::C) }
+            0xBA => { self.reset_bit(0x07, Register::D) }
+            0xBB => { self.reset_bit(0x07, Register::E) }
+            0xBC => { self.reset_bit(0x07, Register::H) }
+            0xBD => { self.reset_bit(0x07, Register::L) }
+            0xBE => { self.reset_bit_mem(0x07, mmu) }
+            0xBF => { self.reset_bit(0x07, Register::A) }
+
+            0xC0 => { self.set_bit(0x00, Register::B) }
+            0xC1 => { self.set_bit(0x00, Register::C) }
+            0xC2 => { self.set_bit(0x00, Register::D) }
+            0xC3 => { self.set_bit(0x00, Register::E) }
+            0xC4 => { self.set_bit(0x00, Register::H) }
+            0xC5 => { self.set_bit(0x00, Register::L) }
+            0xC6 => { self.set_bit_mem(0x00, mmu) }
+            0xC7 => { self.set_bit(0x00, Register::A) }
+            0xC8 => { self.set_bit(0x01, Register::B) }
+            0xC9 => { self.set_bit(0x01, Register::C) }
+            0xCA => { self.set_bit(0x01, Register::D) }
+            0xCB => { self.set_bit(0x01, Register::E) }
+            0xCC => { self.set_bit(0x01, Register::H) }
+            0xCD => { self.set_bit(0x01, Register::L) }
+            0xCE => { self.set_bit_mem(0x01, mmu) }
+            0xCF => { self.set_bit(0x01, Register::A) }
+
+            0xD0 => { self.set_bit(0x02, Register::B) }
+            0xD1 => { self.set_bit(0x02, Register::C) }
+            0xD2 => { self.set_bit(0x02, Register::D) }
+            0xD3 => { self.set_bit(0x02, Register::E) }
+            0xD4 => { self.set_bit(0x02, Register::H) }
+            0xD5 => { self.set_bit(0x02, Register::L) }
+            0xD6 => { self.set_bit_mem(0x02, mmu) }
+            0xD7 => { self.set_bit(0x02, Register::A) }
+            0xD8 => { self.set_bit(0x03, Register::B) }
+            0xD9 => { self.set_bit(0x03, Register::C) }
+            0xDA => { self.set_bit(0x03, Register::D) }
+            0xDB => { self.set_bit(0x03, Register::E) }
+            0xDC => { self.set_bit(0x03, Register::H) }
+            0xDD => { self.set_bit(0x03, Register::L) }
+            0xDE => { self.set_bit_mem(0x03, mmu) }
+            0xDF => { self.set_bit(0x03, Register::A) }
+
+            0xE0 => { self.set_bit(0x04, Register::B) }
+            0xE1 => { self.set_bit(0x04, Register::C) }
+            0xE2 => { self.set_bit(0x04, Register::D) }
+            0xE3 => { self.set_bit(0x04, Register::E) }
+            0xE4 => { self.set_bit(0x04, Register::H) }
+            0xE5 => { self.set_bit(0x04, Register::L) }
+            0xE6 => { self.set_bit_mem(0x04, mmu) }
+            0xE7 => { self.set_bit(0x04, Register::A) }
+            0xE8 => { self.set_bit(0x05, Register::B) }
+            0xE9 => { self.set_bit(0x05, Register::C) }
+            0xEA => { self.set_bit(0x05, Register::D) }
+            0xEB => { self.set_bit(0x05, Register::E) }
+            0xEC => { self.set_bit(0x05, Register::H) }
+            0xED => { self.set_bit(0x05, Register::L) }
+            0xEE => { self.set_bit_mem(0x05, mmu) }
+            0xEF => { self.set_bit(0x05, Register::A) }
+
+            0xF0 => { self.set_bit(0x06, Register::B) }
+            0xF1 => { self.set_bit(0x06, Register::C) }
+            0xF2 => { self.set_bit(0x06, Register::D) }
+            0xF3 => { self.set_bit(0x06, Register::E) }
+            0xF4 => { self.set_bit(0x06, Register::H) }
+            0xF5 => { self.set_bit(0x06, Register::L) }
+            0xF6 => { self.set_bit_mem(0x06, mmu) }
+            0xF7 => { self.set_bit(0x06, Register::A) }
+            0xF8 => { self.set_bit(0x07, Register::B) }
+            0xF9 => { self.set_bit(0x07, Register::C) }
+            0xFA => { self.set_bit(0x07, Register::D) }
+            0xFB => { self.set_bit(0x07, Register::E) }
+            0xFC => { self.set_bit(0x07, Register::H) }
+            0xFD => { self.set_bit(0x07, Register::L) }
+            0xFE => { self.set_bit_mem(0x07, mmu) }
+            0xFF => { self.set_bit(0x07, Register::A) }
 
             _ => { unreachable!() }
         }
