@@ -1,6 +1,6 @@
 use std::{mem};
 
-enum Port {
+pub enum Port {
     JOYP =  0xFF00,
     SB =    0xFF01,
     SC =    0xFF02,
@@ -194,5 +194,15 @@ impl Mmu for Mbc0 {
             }
             _ => { }
         }
+    }
+
+    #[inline]
+    fn io_read(&self, port: Port) -> u8 {
+        self.ram.io[port as usize - 0xFF00]
+    }
+
+    #[inline]
+    fn io_write(&mut self, port: Port, value: u8) {
+        self.ram.io[port as usize - 0xFF00] = value
     }
 }

@@ -2,7 +2,7 @@
 mod tests;
 
 use std::{mem};
-use mmu::Mmu;
+use mmu::{Mmu, Port};
 
 #[derive(Default)]
 pub struct Cpu {
@@ -1179,12 +1179,45 @@ impl Cpu {
         16
     }
 
+    #[inline]
+    fn service_interrupts(&mut self, mmu: &mut impl Mmu) {
+        if !self.interrupts_enabled {
+            return;
+        }
+        let if_value = mmu.io_read(Port::IF);
+        let flags = mmu.io_read(Port::IE) & if_value;
+        if flags == 0x00 {
+            return;
+        } else if (flags & 0x01) != 0x00 {
+            self.rst(0x0040, mmu);
+            mmu.io_write(Port::IF, if_value ^ 0x01);
+            self.interrupts_enabled = false;
+        } else if (flags & 0x02) != 0x00 {
+            self.rst(0x0048, mmu);
+            mmu.io_write(Port::IF, if_value ^ 0x02);
+            self.interrupts_enabled = false;
+        } else if (flags & 0x04) != 0x00 {
+            self.rst(0x0050, mmu);
+            mmu.io_write(Port::IF, if_value ^ 0x04);
+            self.interrupts_enabled = false;
+        } else if (flags & 0x08) != 0x00 {
+            self.rst(0x0058, mmu);
+            mmu.io_write(Port::IF, if_value ^ 0x08);
+            self.interrupts_enabled = false;
+        } else if (flags & 0x10) != 0x00 {
+            self.rst(0x0060, mmu);
+            mmu.io_write(Port::IF, if_value ^ 0x10);
+            self.interrupts_enabled = false;
+        }
+    }
+
     pub fn cycle(&mut self, mmu: &mut impl Mmu) -> usize {
-        let opcode = self.read(mmu);
         if self.halted {
             // TODO: exit halt state
             return 4;
         }
+        self.service_interrupts(mmu);
+        let opcode = self.read(mmu);
         match opcode {
             0x00 => { self.nop() },
             0x01 => { self.read_wide_immediate(WideRegister::BC, mmu) }
